@@ -436,6 +436,80 @@ class FTPServer {
                 }
                 break;
                 
+            case 'RETR':
+                if (!isset($this->clients[$clientId])) {
+                    $this->sendResponse($client, "530 请先登录\r\n");
+                    break;
+                }
+                $username = $this->clients[$clientId];
+                
+                if (!$this->checkPermission($username, 'read')) {
+                    $this->sendResponse($client, "550 没有读取权限\r\n");
+                    break;
+                }
+                
+                $filename = isset($cmd[1]) ? $cmd[1] : '';
+                if (empty($filename)) {
+                    $this->sendResponse($client, "553 无效的文件名\r\n");
+                    break;
+                }
+                
+                $filepath = $this->users[$username]['root_dir'] . '/' . $filename;
+                if (!file_exists($filepath) || !is_file($filepath)) {
+                    $this->sendResponse($client, "550 文件不存在\r\n");
+                    break;
+                }
+                
+                $this->sendResponse($client, "150 开始传输文件\r\n");
+                
+                try {
+                    $fp = fopen($filepath, 'rb');
+                    if (!$fp) {
+                        throw new Exception("无法打开文件");
+                    }
+                    
+                    // 设置socket为非阻塞模式
+                    socket_set_nonblock($client);
+                    
+                    while (!feof($fp)) {
+                        $data = fread($fp, 8192);
+                        $dataLength = strlen($data);
+                        $sent = 0;
+                        
+                        // 循环发送直到所有数据都发送完成
+                        while ($sent < $dataLength) {
+                            $chunk = @socket_write($client, substr($data, $sent));
+                            if ($chunk === false) {
+                                $error = socket_last_error($client);
+                                if ($error === EAGAIN || $error === EWOULDBLOCK) {
+                                    usleep(1000);
+                                    continue;
+                                }
+                                throw new Exception("发送数据失败: " . socket_strerror($error));
+                            }
+                            $sent += $chunk;
+                        }
+                        
+                        // 每发送1MB数据休息1ms
+                        if (ftell($fp) % (1024 * 1024) === 0) {
+                            usleep(1000);
+                        }
+                    }
+                    
+                    fclose($fp);
+                    
+                    // 恢复阻塞模式并发送完成响应
+                    socket_set_block($client);
+                    $this->sendResponse($client, "226 文件传输完成\r\n");
+                } catch (Exception $e) {
+                    if (isset($fp)) {
+                        fclose($fp);
+                    }
+                    socket_set_block($client);
+                    $this->sendResponse($client, "550 文件传输失败: " . $e->getMessage() . "\r\n");
+                }
+                break;
+                
             default:
                 if (!empty($action)) {
                     $this->sendResponse($client, "500 未知命令\r\n");

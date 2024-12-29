@@ -293,4 +293,92 @@ class FTPClient {
             throw new Exception("上传失败: " . $e->getMessage());
         }
     }
+    
+    public function downloadFile($remoteFile, $localFile) {
+        if (!$this->loggedIn) {
+            throw new Exception("未登录");
+        }
+        
+        // 发送RETR命令
+        if (!$this->sendCommand("RETR " . $remoteFile)) {
+            throw new Exception("发送RETR命令失败");
+        }
+        
+        $response = $this->readResponse();
+        if (strpos($response, '150') !== 0) {
+            throw new Exception("服务器拒绝发送文件: " . $response);
+        }
+        
+        try {
+            // 接收文件数据
+            $fp = fopen($localFile, 'wb');
+            if (!$fp) {
+                throw new Exception("无法创建本地文件");
+            }
+            
+            $startTime = time();
+            $timeout = 10; // 减少超时时间
+            $bufferSize = 65536; // 增加缓冲区大小到64KB
+            $dataReceived = false;
+            $lastDataTime = time();
+            
+            while (true) {
+                $data = @socket_read($this->socket, $bufferSize, PHP_BINARY_READ);
+                
+                if ($data === false) {
+                    $error = socket_last_error($this->socket);
+                    if ($error === EAGAIN || $error === EWOULDBLOCK) {
+                        // 检查是否已经接收完数据
+                        if ($dataReceived && (time() - $lastDataTime > 2)) {
+                            break;
+                        }
+                        // 检查总体超时
+                        if (time() - $startTime > $timeout) {
+                            throw new Exception("接收数据超时");
+                        }
+                        usleep(10000); // 10ms
+                        continue;
+                    }
+                    throw new Exception("读取数据失败: " . socket_strerror($error));
+                }
+                
+                if ($data === '') {
+                    // 如果已经接收到数据并且超过2秒没有新数据，认为传输完成
+                    if ($dataReceived && (time() - $lastDataTime > 2)) {
+                        break;
+                    }
+                    // 检查总体超时
+                    if (time() - $startTime > $timeout) {
+                        throw new Exception("接收数据超时");
+                    }
+                    usleep(10000);
+                    continue;
+                }
+                
+                $dataReceived = true;
+                $lastDataTime = time();
+                fwrite($fp, $data);
+            }
+            
+            fclose($fp);
+            
+            // 尝试读取完成响应，但不强制要求
+            try {
+                $response = $this->readResponse();
+                if (strpos($response, '226') !== 0) {
+                    error_log("警告：未收到预期的完成响应：" . $response);
+                }
+            } catch (Exception $e) {
+                error_log("警告：读取完成响应失败：" . $e->getMessage());
+            }
+            
+            return true;
+        } catch (Exception $e) {
+            if (isset($fp)) {
+                fclose($fp);
+            }
+            @unlink($localFile);
+            throw new Exception("下载失败: " . $e->getMessage());
+        }
+    }
 } 

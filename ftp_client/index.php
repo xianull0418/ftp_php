@@ -518,6 +518,52 @@
         document.getElementById('progress-bar-fill').style.width = `${percent}%`;
         document.getElementById('progress-text').textContent = `正在上传: ${percent}%`;
     }
+
+    // 修改下载功能
+    async function downloadFile(path) {
+        try {
+            showLoading('准备下载文件...');
+            
+            // 创建一个隐藏的链接来处理下载
+            const response = await fetch('download.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `path=${encodeURIComponent(path)}`
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            // 获取文件名
+            const filename = path.split('/').pop();
+            
+            // 创建 Blob 对象
+            const blob = await response.blob();
+            
+            // 创建下载链接
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = filename;
+            
+            // 添加到文档并触发点击
+            document.body.appendChild(a);
+            a.click();
+            
+            // 清理
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            hideLoading();
+        } catch (error) {
+            console.error('Error:', error);
+            alert('下载失败: ' + error.message);
+            hideLoading();
+        }
+    }
     </script>
 
     <!-- 添加 Font Awesome 图标库 -->
