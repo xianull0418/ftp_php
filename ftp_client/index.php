@@ -37,7 +37,134 @@
             display: none;
             justify-content: center;
             align-items: center;
-            color: white;
+            flex-direction: column;
+            z-index: 1000;
+        }
+        .loading-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            margin: 10px auto;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .upload-progress {
+            display: none;
+            margin-top: 10px;
+            text-align: center;
+        }
+        .progress-bar {
+            width: 200px;
+            height: 6px;
+            background-color: #f3f3f3;
+            border-radius: 3px;
+            margin: 10px auto;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .file-list {
+            margin: 20px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .file-list-header {
+            display: grid;
+            grid-template-columns: 3fr 2fr 1fr 1fr 1fr;
+            gap: 15px;
+            background-color: #f8f9fa;
+            padding: 12px 15px;
+            font-weight: bold;
+            border-bottom: 2px solid #dee2e6;
+            align-items: center;
+        }
+        
+        .file-item {
+            display: grid;
+            grid-template-columns: 3fr 2fr 1fr 1fr 1fr;
+            gap: 15px;
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
+            transition: background-color 0.2s;
+            align-items: center;
+        }
+        
+        .file-item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .file-name {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .file-icon {
+            width: 24px;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        
+        .file-date, .file-type, .file-size {
+            color: #666;
+        }
+        
+        .file-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 12px;
+            border-radius: 3px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .btn-primary { background-color: #007bff; }
+        .btn-download { background-color: #28a745; }
+        .btn-delete { background-color: #dc3545; }
+        
+        .icon-directory { color: #ffd700; }
+        .icon-image { color: #28a745; }
+        .icon-document { color: #007bff; }
+        .icon-archive { color: #6c757d; }
+        .icon-file { color: #495057; }
+        
+        .empty-message {
+            padding: 30px;
+            text-align: center;
+            color: #666;
+            background-color: #f8f9fa;
+        }
+        
+        .directory-path {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            color: #666;
         }
     </style>
 </head>
@@ -74,12 +201,31 @@
         </div>
     </div>
 
-    <div id="loading">正在处理...</div>
+    <div id="loading">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <div id="loading-text">处理中...</div>
+            <div class="upload-progress" id="upload-progress">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                </div>
+                <div id="progress-text">正在上传: 0%</div>
+            </div>
+        </div>
+    </div>
 
     <script>
+    let currentPath = '/';  // 添加全局变量跟踪当前路径
+
+    function getCurrentPath() {
+        return currentPath || '/';
+    }
+
     // 显示加载中
-    function showLoading() {
+    function showLoading(message = '处理中...') {
         document.getElementById('loading').style.display = 'flex';
+        document.getElementById('loading-text').textContent = message;
+        document.getElementById('upload-progress').style.display = 'none';
     }
 
     // 隐藏加载中
@@ -117,13 +263,14 @@
             
             const data = await response.json();
             if (data.success) {
+                sessionStorage.setItem('server', formData.get('server'));
                 showFileSection();
             } else {
                 alert(data.message || '登录失败');
             }
         } catch (error) {
             console.error('Error:', error);
-            alert('连接错误: ' + error.message);
+            alert('登录错误: ' + error.message);
         } finally {
             hideLoading();
         }
@@ -142,33 +289,17 @@
         try {
             const response = await fetch('list.php');
             const data = await response.json();
-            
-            const fileList = document.getElementById('file-list');
             if (data.success) {
-                if (Array.isArray(data.files) && data.files.length > 0) {
-                    fileList.innerHTML = data.files.map(file => 
-                        `<div class="file-item">
-                            <span>${file}</span>
-                            <div class="file-actions">
-                                <button onclick="downloadFile('${file}')" class="btn btn-small">下载</button>
-                                <button onclick="deleteFile('${file}')" class="btn btn-small btn-danger">删除</button>
-                            </div>
-                        </div>`
-                    ).join('');
-                } else {
-                    fileList.innerHTML = '<div class="empty-message">目录为空</div>';
-                }
+                currentPath = data.current_path || '/';
+                renderFileList(data.files);
+                document.getElementById('serverInfo').textContent = 
+                    `(${data.username}@${sessionStorage.getItem('server')})`;
             } else {
-                if (data.message === '未登录') {
-                    document.getElementById('loginSection').style.display = 'block';
-                    document.getElementById('fileSection').style.display = 'none';
-                }
-                fileList.innerHTML = `<div class="error-message">${data.message}</div>`;
+                alert(data.message || '加载文件列表失败');
             }
         } catch (error) {
-            console.error('Error loading file list:', error);
-            document.getElementById('file-list').innerHTML = 
-                `<div class="error-message">加载文件列表失败: ${error.message}</div>`;
+            console.error('Error:', error);
+            alert('加载文件列表失败: ' + error.message);
         } finally {
             hideLoading();
         }
@@ -188,70 +319,208 @@
         }
     }
 
-    // 处理上传表单提交
+    // 修改上传表单处理
     document.getElementById('uploadForm').onsubmit = async function(e) {
         e.preventDefault();
-        showLoading();
+        showUploadProgress();
         
         try {
             const formData = new FormData(this);
-            const response = await fetch('upload.php', {
-                method: 'POST',
-                body: formData
-            });
+            formData.append('path', currentPath);
             
-            const data = await response.json();
-            if (data.success) {
-                alert('文件上传成功');
-                loadFileList(); // 重新加载文件列表
-            } else {
-                alert(data.message || '上传失败');
-            }
+            const xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    updateProgress(percent);
+                }
+            };
+            
+            xhr.onload = async function() {
+                if (xhr.status === 200) {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data.success) {
+                        alert('文件上传成功');
+                        await enterDirectory(currentPath);
+                    } else {
+                        alert(data.message || '上传失败');
+                    }
+                } else {
+                    alert('上传失败');
+                }
+                hideLoading();
+                e.target.reset();
+            };
+            
+            xhr.onerror = function() {
+                alert('上传错误');
+                hideLoading();
+                e.target.reset();
+            };
+            
+            xhr.open('POST', 'upload.php', true);
+            xhr.send(formData);
         } catch (error) {
             console.error('Error:', error);
             alert('上传错误: ' + error.message);
-        } finally {
             hideLoading();
-            this.reset(); // 重置表单
+            this.reset();
         }
     };
+
+    // 修改文件列表渲染逻辑
+    function renderFileList(files) {
+        const fileList = document.getElementById('file-list');
+        if (!files || files.length === 0) {
+            fileList.innerHTML = '<div class="empty-message">目录为空</div>';
+            return;
+        }
+
+        // 确保files是数组
+        if (typeof files === 'string') {
+            try {
+                files = JSON.parse(files);
+            } catch (e) {
+                console.error('解析文件列表失败:', e);
+                fileList.innerHTML = '<div class="error-message">加载文件列表失败</div>';
+                return;
+            }
+        }
+
+        fileList.innerHTML = `
+            <div class="directory-path">
+                <i class="fas fa-folder-open"></i> 
+                当前目录: ${getCurrentPath()}
+                ${currentPath !== '/' ? `
+                    <button onclick="goToParentDirectory()" class="btn btn-small">
+                        <i class="fas fa-level-up-alt"></i> 返回上级
+                    </button>
+                ` : ''}
+            </div>
+            <div class="file-list">
+                <div class="file-list-header">
+                    <div>文件名</div>
+                    <div>修改时间</div>
+                    <div>类型</div>
+                    <div>大小</div>
+                    <div>操作</div>
+                </div>
+                ${files.map(file => {
+                    // 确保file是对象
+                    if (typeof file === 'string') {
+                        try {
+                            file = JSON.parse(file);
+                        } catch (e) {
+                            console.error('解析文件数据失败:', e);
+                            return '';
+                        }
+                    }
+                    
+                    return `
+                        <div class="file-item">
+                            <div class="file-name">
+                                ${getFileIcon(file)}
+                                <span>${file.name}</span>
+                            </div>
+                            <div class="file-date">${file.mtime}</div>
+                            <div class="file-type">${getFileTypeText(file)}</div>
+                            <div class="file-size">${file.is_dir ? '-' : file.size}</div>
+                            <div class="file-actions">
+                                ${file.is_dir ? `
+                                    <button onclick="enterDirectory('${file.path}')" class="btn btn-small btn-primary">
+                                        <i class="fas fa-folder-open"></i> 打开
+                                    </button>
+                                ` : `
+                                    <button onclick="downloadFile('${file.path}')" class="btn btn-small btn-download">
+                                        <i class="fas fa-download"></i> 下载
+                                    </button>
+                                `}
+                                <button onclick="deleteFile('${file.path}')" class="btn btn-small btn-delete">
+                                    <i class="fas fa-trash"></i> 删除
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    function getFileIcon(file) {
+        const icons = {
+            'directory': 'fa-folder',
+            'image': 'fa-file-image',
+            'document': 'fa-file-alt',
+            'archive': 'fa-file-archive',
+            'file': 'fa-file'
+        };
+        
+        const iconClass = icons[file.type] || icons.file;
+        const colorClass = `icon-${file.type}`;
+        return `<i class="fas ${iconClass} ${colorClass}"></i>`;
+    }
+
+    // 添加目录导航功能
+    async function enterDirectory(path) {
+        showLoading();
+        try {
+            // 保存上一个路径，以便返回
+            const prevPath = currentPath;
+            
+            const response = await fetch(`list.php?path=${encodeURIComponent(path)}`);
+            const data = await response.json();
+            if (data.success) {
+                currentPath = data.current_path || path;  // 更新当前路径
+                renderFileList(data.files);
+                
+                // 更新浏览器历史记录
+                const state = { path: currentPath };
+                const title = `FTP - ${currentPath}`;
+                window.history.pushState(state, title, `?path=${encodeURIComponent(currentPath)}`);
+            } else {
+                alert(data.message || '无法打开目录');
+                currentPath = prevPath;  // 恢复之前的路径
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('打开目录失败: ' + error.message);
+        } finally {
+            hideLoading();
+        }
+    }
+
+    // 添加返回上级目录功能
+    function goToParentDirectory() {
+        if (currentPath === '/') return;
+        
+        const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
+        enterDirectory(parentPath);
+    }
+
+    function getFileTypeText(file) {
+        const types = {
+            'directory': '文件夹',
+            'image': '图片',
+            'document': '文档',
+            'archive': '压缩包',
+            'file': '文件'
+        };
+        return types[file.type] || '文件';
+    }
+
+    function showUploadProgress() {
+        document.getElementById('loading').style.display = 'flex';
+        document.getElementById('upload-progress').style.display = 'block';
+        document.getElementById('loading-text').textContent = '文件上传中';
+    }
+
+    function updateProgress(percent) {
+        document.getElementById('progress-bar-fill').style.width = `${percent}%`;
+        document.getElementById('progress-text').textContent = `正在上传: ${percent}%`;
+    }
     </script>
 
-    <style>
-    .header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 20px;
-    }
-    .file-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px;
-        border-bottom: 1px solid #eee;
-    }
-    .file-actions {
-        display: flex;
-        gap: 8px;
-    }
-    .btn-small {
-        padding: 4px 8px;
-        font-size: 12px;
-    }
-    .btn-danger {
-        background-color: #dc3545;
-    }
-    .empty-message {
-        padding: 20px;
-        text-align: center;
-        color: #666;
-    }
-    .error-message {
-        padding: 20px;
-        text-align: center;
-        color: #dc3545;
-    }
-    </style>
+    <!-- 添加 Font Awesome 图标库 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
 </body>
 </html> 

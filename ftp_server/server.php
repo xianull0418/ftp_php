@@ -18,10 +18,18 @@ class FTPServer {
     private $currentUser = null;
     private $clientIds = [];
     private $nextClientId = 1;
+    private $baseDir = '/root/ftp_php';  // FTP根目录
+    private $usersDir = '/root/ftp_php/users';  // 用户目录
     private $users = [
         'admin' => [
             'password' => 'admin123',
-            'root_dir' => '/root/ftp_php'
+            'permissions' => ['read', 'write', 'delete', 'admin'],  // 添加admin权限
+            'root_dir' => '/root/ftp_php'     // admin可以访问根目录
+        ],
+        'guest' => [
+            'password' => 'guest123',
+            'permissions' => ['read'],
+            'root_dir' => '/root/ftp_php/users/guest'
         ]
     ];
     
@@ -60,6 +68,28 @@ class FTPServer {
         }
         
         echo "FTP服务器启动在端口 $port\n";
+
+        // 初始化基础目录
+        if (!is_dir($this->baseDir)) {
+            if (!mkdir($this->baseDir, 0755, true)) {
+                die("无法创建基础目录 {$this->baseDir}");
+            }
+            echo "已创建基础目录: {$this->baseDir}\n";
+        }
+        
+        // 初始化用户目录
+        foreach ($this->users as $username => $userInfo) {
+            if (!is_dir($userInfo['root_dir'])) {
+                if (!mkdir($userInfo['root_dir'], 0755, true)) {
+                    die("无法创建用户目录 {$userInfo['root_dir']}");
+                }
+                echo "已创建用户 $username 的目录: {$userInfo['root_dir']}\n";
+                
+                // 设置目录权限
+                chmod($userInfo['root_dir'], 0755);
+                chown($userInfo['root_dir'], 'www-data');  // 或其他适当的用户
+            }
+        }
     }
     
     public function handleSignal($signo) {
@@ -138,26 +168,26 @@ class FTPServer {
             $clientId = $this->getClientId($client);
             socket_getpeername($client, $address, $port);
             
-            socket_set_option($client, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 5, 'usec' => 0));
-            socket_set_option($client, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 5, 'usec' => 0));
+            // 设置socket选项
+            socket_set_option($client, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 30, 'usec' => 0));
+            socket_set_option($client, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 30, 'usec' => 0));
+            socket_set_option($client, SOL_SOCKET, SO_KEEPALIVE, 1);
             
             $this->sendResponse($client, "220 欢迎使用FTP服务器\r\n");
             
             while ($this->running) {
                 $command = @socket_read($client, 1024, PHP_NORMAL_READ);
+                
                 if ($command === false) {
                     $error = socket_last_error($client);
                     if ($error === EAGAIN || $error === EWOULDBLOCK) {
-                        usleep(100000); // 100ms
                         continue;
                     }
-                    echo "读取命令失败: " . socket_strerror($error) . "\n";
-                    break;
+                    throw new Exception("读取命令失败: " . socket_strerror($error));
                 }
                 
                 if ($command === '') {
-                    echo "客户端断开连接: $address:$port\n";
-                    break;
+                    throw new Exception("客户端断开连接");
                 }
                 
                 $command = trim($command);
@@ -167,7 +197,7 @@ class FTPServer {
                 }
             }
         } catch (Exception $e) {
-            echo "处理客户端时发生错误: " . $e->getMessage() . "\n";
+            error_log("客户端处理错误 ($address:$port): " . $e->getMessage());
         } finally {
             $this->cleanupClient($client);
             @socket_close($client);
@@ -176,6 +206,10 @@ class FTPServer {
     
     private function cleanupClient($client) {
         try {
+            if (!is_resource($client)) {
+                return;
+            }
+            
             socket_getpeername($client, $address, $port);
             $clientKey = "$address:$port";
             
@@ -186,14 +220,44 @@ class FTPServer {
                 echo "清理客户端: $address:$port\n";
             }
         } catch (Exception $e) {
-            echo "清理客户端时发生错误: " . $e->getMessage() . "\n";
+            error_log("清理客户端时发生错误: " . $e->getMessage());
         }
     }
     
     private function sendResponse($client, $message) {
-        socket_getpeername($client, $address, $port);
-        echo "发送响应到 $address:$port: $message";
-        @socket_write($client, $message, strlen($message));
+        try {
+            socket_getpeername($client, $address, $port);
+            echo "发送响应到 $address:$port: $message";
+            
+            // 如果有mbstring扩展，使用它来处理编码
+            if (function_exists('mb_convert_encoding')) {
+                $message = mb_convert_encoding($message, 'UTF-8', mb_detect_encoding($message));
+            }
+            
+            // 分块发送大消息
+            $messageLength = strlen($message);
+            $offset = 0;
+            $chunkSize = 1024;
+            
+            while ($offset < $messageLength) {
+                $chunk = substr($message, $offset, $chunkSize);
+                $sent = @socket_write($client, $chunk, strlen($chunk));
+                
+                if ($sent === false) {
+                    throw new Exception("发送响应失败: " . socket_strerror(socket_last_error($client)));
+                }
+                
+                $offset += $sent;
+            }
+        } catch (Exception $e) {
+            error_log("发送响应错误: " . $e->getMessage());
+            throw $e;
+        }
+    }
+    
+    private function checkPermission($username, $permission) {
+        return isset($this->users[$username]['permissions']) && 
+               in_array($permission, $this->users[$username]['permissions']);
     }
     
     private function handleCommand($client, $command) {
@@ -236,15 +300,140 @@ class FTPServer {
                     break;
                 }
                 $username = $this->clients[$clientId];
-                $rootDir = $this->users[$username]['root_dir'];
                 
-                if (!is_dir($rootDir)) {
-                    mkdir($rootDir, 0755, true);
+                if (!$this->checkPermission($username, 'read')) {
+                    $this->sendResponse($client, "550 没有读取权限\r\n");
+                    break;
                 }
                 
-                $files = scandir($rootDir);
-                $fileList = implode("\n", array_filter($files, function($f) { return $f != '.' && $f != '..'; }));
-                $this->sendResponse($client, "150 开始传输文件列表\r\n$fileList\r\n226 传输完成\r\n");
+                // 获取请求的目录路径
+                $requestPath = isset($cmd[1]) ? trim($cmd[1]) : '';
+                $rootDir = $this->users[$username]['root_dir'];
+                
+                // 构建完整路径
+                $targetDir = $rootDir;
+                if (!empty($requestPath)) {
+                    // 确保路径安全，防止目录遍历攻击
+                    $requestPath = str_replace(['..', '\\'], ['', '/'], $requestPath);
+                    $targetDir = $rootDir . '/' . ltrim($requestPath, '/');
+                }
+                
+                if (!is_dir($targetDir)) {
+                    $this->sendResponse($client, "550 目录不存在\r\n");
+                    break;
+                }
+                
+                try {
+                    $this->sendResponse($client, "150 开始传输文件列表\r\n");
+                    
+                    $files = $this->getFileList($targetDir, $username, $requestPath);
+                    foreach ($files as $file) {
+                        $this->sendResponse($client, json_encode($file, JSON_UNESCAPED_UNICODE) . "\r\n");
+                    }
+                    
+                    usleep(100000);
+                    $this->sendResponse($client, "226 传输完成\r\n");
+                } catch (Exception $e) {
+                    $this->sendResponse($client, "550 获取文件列表失败: " . $e->getMessage() . "\r\n");
+                }
+                break;
+                
+            case 'STOR':
+                if (!isset($this->clients[$clientId])) {
+                    $this->sendResponse($client, "530 请先登录\r\n");
+                    break;
+                }
+                $username = $this->clients[$clientId];
+                
+                if (!$this->checkPermission($username, 'write')) {
+                    $this->sendResponse($client, "550 没有写入权限\r\n");
+                    break;
+                }
+                
+                $filename = isset($cmd[1]) ? $cmd[1] : '';
+                if (empty($filename)) {
+                    $this->sendResponse($client, "553 无效的文件名\r\n");
+                    break;
+                }
+                
+                // 构建完整的文件路径
+                $filepath = $this->users[$username]['root_dir'] . '/' . $filename;
+                $dirpath = dirname($filepath);
+                
+                // 确保目录存在
+                if (!is_dir($dirpath)) {
+                    if (!mkdir($dirpath, 0755, true)) {
+                        $this->sendResponse($client, "550 无法创建目录\r\n");
+                        break;
+                    }
+                }
+                
+                $this->sendResponse($client, "150 准备接收文件\r\n");
+                
+                try {
+                    $fp = fopen($filepath, 'wb');
+                    if (!$fp) {
+                        throw new Exception("无法创建文件");
+                    }
+                    
+                    $startTime = time();
+                    $timeout = 30;
+                    $bufferSize = 8192;
+                    $dataReceived = false;
+                    
+                    // 设置socket为非阻塞模式
+                    socket_set_nonblock($client);
+                    
+                    while (true) {
+                        $data = @socket_read($client, $bufferSize, PHP_BINARY_READ);
+                        if ($data === false) {
+                            $error = socket_last_error($client);
+                            if ($error === EAGAIN || $error === EWOULDBLOCK) {
+                                if ($dataReceived && time() - $startTime > 1) {
+                                    // 如果已经接收到数据并且超过1秒没有新数据，认为传输完成
+                                    break;
+                                }
+                                if (time() - $startTime > $timeout) {
+                                    throw new Exception("接收数据超时");
+                                }
+                                usleep(10000); // 10ms
+                                continue;
+                            }
+                            throw new Exception("读取数据失败: " . socket_strerror($error));
+                        }
+                        
+                        if ($data === '') {
+                            if ($dataReceived) {
+                                break;
+                            }
+                            if (time() - $startTime > $timeout) {
+                                throw new Exception("接收数据超时");
+                            }
+                            usleep(10000);
+                            continue;
+                        }
+                        
+                        $dataReceived = true;
+                        $startTime = time(); // 重置超时计时器
+                        fwrite($fp, $data);
+                    }
+                    
+                    // 恢复阻塞模式
+                    socket_set_block($client);
+                    
+                    fclose($fp);
+                    chmod($filepath, 0644);
+                    
+                    // 发送完成响应
+                    $this->sendResponse($client, "226 文件传输完成\r\n");
+                } catch (Exception $e) {
+                    if (isset($fp)) {
+                        fclose($fp);
+                    }
+                    @unlink($filepath);
+                    socket_set_block($client);
+                    $this->sendResponse($client, "550 文件上传失败: " . $e->getMessage() . "\r\n");
+                }
                 break;
                 
             default:
@@ -253,6 +442,90 @@ class FTPServer {
                 }
                 break;
         }
+    }
+    
+    private function getFileList($dir, $username, $currentPath = '') {
+        $files = [];
+        $items = scandir($dir);
+        
+        // 如果不是根目录，添加返回上级目录的选项
+        if (!empty($currentPath)) {
+            $parentPath = dirname($currentPath);
+            if ($parentPath == '.') $parentPath = '';
+            $files[] = [
+                'name' => '..',
+                'path' => $parentPath,
+                'size' => '-',
+                'raw_size' => 0,
+                'mtime' => '-',
+                'is_dir' => true,
+                'type' => 'directory'
+            ];
+        }
+        
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') continue;
+            
+            $path = $dir . '/' . $item;
+            $relativePath = $currentPath . '/' . $item;
+            $relativePath = ltrim($relativePath, '/');
+            
+            if ($this->checkPermission($username, 'admin') || 
+                strpos($path, $this->users[$username]['root_dir']) === 0) {
+                
+                $stat = stat($path);
+                $size = $stat['size'];
+                $sizeStr = $this->formatFileSize($size);
+                
+                $files[] = [
+                    'name' => $item,
+                    'path' => $relativePath,
+                    'size' => $sizeStr,
+                    'raw_size' => $size,
+                    'mtime' => date('Y-m-d H:i:s', $stat['mtime']),
+                    'is_dir' => is_dir($path),
+                    'type' => is_dir($path) ? 'directory' : $this->getFileType($item)
+                ];
+            }
+        }
+        
+        // 排序：目录在前，文件在后，按名称排序
+        usort($files, function($a, $b) {
+            if ($a['name'] === '..') return -1;
+            if ($b['name'] === '..') return 1;
+            if ($a['is_dir'] !== $b['is_dir']) {
+                return $b['is_dir'] - $a['is_dir'];
+            }
+            return strcasecmp($a['name'], $b['name']);
+        });
+        
+        return $files;
+    }
+    
+    private function formatFileSize($size) {
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $i = 0;
+        while ($size >= 1024 && $i < count($units) - 1) {
+            $size /= 1024;
+            $i++;
+        }
+        return round($size, 2) . ' ' . $units[$i];
+    }
+    
+    private function getFileType($filename) {
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        $imageTypes = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
+        $docTypes = ['doc', 'docx', 'pdf', 'txt', 'rtf', 'odt'];
+        $archiveTypes = ['zip', 'rar', '7z', 'tar', 'gz'];
+        
+        if (in_array($ext, $imageTypes)) return 'image';
+        if (in_array($ext, $docTypes)) return 'document';
+        if (in_array($ext, $archiveTypes)) return 'archive';
+        return 'file';
+    }
+    
+    private function getRelativePath($path, $rootDir) {
+        return str_replace($rootDir . '/', '', $path);
     }
 }
 

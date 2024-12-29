@@ -65,24 +65,84 @@ class FTPClient {
         }
     }
     
-    public function listFiles() {
+    public function listFiles($path = '') {
         if (!$this->loggedIn) {
             throw new Exception("未登录");
         }
         
-        if (!$this->sendCommand("LIST")) {
+        // 发送LIST命令，如果有路径则包含路径
+        $command = empty($path) ? "LIST" : "LIST " . $path;
+        if (!$this->sendCommand($command)) {
             throw new Exception("发送LIST命令失败");
         }
         
         $response = $this->readResponse();
-        if (strpos($response, '150') === 0) {
-            $lines = explode("\n", $response);
-            array_shift($lines); // 移除第一行（150响应）
-            array_pop($lines);   // 移除最后一行（226响应）
-            return array_filter($lines); // 返回文件列表
+        if (strpos($response, '150') !== 0) {
+            throw new Exception("获取文件列表失败: " . $response);
         }
         
-        throw new Exception("获取文件列表失败: " . $response);
+        // 读取文件列表
+        $files = [];
+        $buffer = '';
+        $startTime = time();
+        $timeout = 30;
+        
+        while (true) {
+            $data = @socket_read($this->socket, 8192, PHP_NORMAL_READ);
+            if ($data === false) {
+                $error = socket_last_error($this->socket);
+                if ($error === EAGAIN || $error === EWOULDBLOCK) {
+                    if (time() - $startTime > $timeout) {
+                        throw new Exception("读取文件列表超时");
+                    }
+                    usleep(100000);
+                    continue;
+                }
+                throw new Exception("读取文件列表失败: " . socket_strerror($error));
+            }
+            
+            if ($data === '') {
+                if (time() - $startTime > $timeout) {
+                    throw new Exception("读取文件列表超时");
+                }
+                usleep(100000);
+                continue;
+            }
+            
+            $buffer .= $data;
+            
+            // 检查是否收到完整的响应
+            if (strpos($buffer, "226") !== false) {
+                break;
+            }
+        }
+        
+        // 解析文件列表
+        $lines = explode("\r\n", $buffer);
+        foreach ($lines as $line) {
+            if (empty($line)) continue;
+            if (strpos($line, '150') === 0) continue;
+            if (strpos($line, '226') === 0) continue;
+            
+            try {
+                $fileInfo = json_decode($line, true);
+                if ($fileInfo !== null) {
+                    $files[] = $fileInfo;
+                }
+            } catch (Exception $e) {
+                error_log("解析文件信息失败: " . $line);
+            }
+        }
+        
+        // 等待最后的226响应（如果还没收到）
+        if (strpos($buffer, "226") === false) {
+            $completion = $this->readResponse();
+            if (strpos($completion, '226') !== 0) {
+                throw new Exception("文件列表传输未正常完成: " . $completion);
+            }
+        }
+        
+        return $files;
     }
     
     private function sendCommand($command) {
@@ -94,28 +154,33 @@ class FTPClient {
         $response = '';
         $startTime = time();
         $buffer = '';
+        $shortTimeout = 5; // 缩短单次读取的超时时间
         
         while (true) {
-            // 使用二进制安全的读取
-            $chunk = @socket_read($this->socket, 1024, PHP_BINARY_READ);
-            
+            $chunk = @socket_read($this->socket, 8192, PHP_NORMAL_READ);
             if ($chunk === false) {
                 $error = socket_last_error($this->socket);
                 if ($error === EAGAIN || $error === EWOULDBLOCK) {
-                    if (time() - $startTime > $this->timeout) {
+                    if (time() - $startTime > $shortTimeout) {
+                        // 如果有部分响应，返回它
+                        if (!empty($buffer) && preg_match('/^[123456]\d{2}.*\r\n$/s', $buffer)) {
+                            return $buffer;
+                        }
                         throw new Exception("读取响应超时");
                     }
-                    usleep(100000); // 等待100ms
+                    usleep(10000); // 减少等待时间到10ms
                     continue;
                 }
                 throw new Exception("读取响应失败: " . socket_strerror($error));
             }
             
             if ($chunk === '') {
-                if (time() - $startTime > $this->timeout) {
-                    throw new Exception("读取响应超时");
+                if (time() - $startTime > $shortTimeout) {
+                    if (!empty($buffer) && preg_match('/^[123456]\d{2}.*\r\n$/s', $buffer)) {
+                        return $buffer;
+                    }
                 }
-                usleep(100000); // 等待100ms
+                usleep(10000);
                 continue;
             }
             
@@ -123,18 +188,9 @@ class FTPClient {
             
             // 检查是否收到完整的响应
             if (preg_match('/^[123456]\d{2}.*\r\n$/s', $buffer)) {
-                $response = $buffer;
-                break;
+                return $buffer;
             }
         }
-        
-        // 如果有mbstring扩展，使用它来处理编码
-        if (function_exists('mb_convert_encoding')) {
-            $response = mb_convert_encoding($response, 'UTF-8', mb_detect_encoding($response));
-        }
-        
-        error_log("收到FTP响应: " . $response);
-        return $response;
     }
     
     public function __destruct() {
@@ -153,7 +209,7 @@ class FTPClient {
         }
         
         // 发送STOR命令
-        if (!$this->sendCommand("STOR " . basename($remoteFile))) {
+        if (!$this->sendCommand("STOR " . $remoteFile)) {
             throw new Exception("发送STOR命令失败");
         }
         
@@ -162,22 +218,79 @@ class FTPClient {
             throw new Exception("服务器拒绝接收文件: " . $response);
         }
         
-        // 发送文件数据
-        $fp = fopen($localFile, 'rb');
-        while (!feof($fp)) {
-            $data = fread($fp, 8192);
-            if (@socket_write($this->socket, $data) === false) {
-                fclose($fp);
-                throw new Exception("发送文件数据失败");
+        try {
+            // 发送文件数据
+            $fp = fopen($localFile, 'rb');
+            $fileSize = filesize($localFile);
+            $totalSent = 0;
+            $bufferSize = 65536; // 增加缓冲区大小到64KB
+            
+            // 设置socket为非阻塞模式
+            socket_set_nonblock($this->socket);
+            
+            while (!feof($fp)) {
+                $data = fread($fp, $bufferSize);
+                $dataLength = strlen($data);
+                $sent = 0;
+                
+                // 循环发送直到所有数据都发送完成
+                while ($sent < $dataLength) {
+                    $chunk = @socket_write($this->socket, substr($data, $sent));
+                    if ($chunk === false) {
+                        $error = socket_last_error($this->socket);
+                        if ($error === EAGAIN || $error === EWOULDBLOCK) {
+                            usleep(1000); // 等待1ms
+                            continue;
+                        }
+                        fclose($fp);
+                        socket_set_block($this->socket);
+                        throw new Exception("发送文件数据失败: " . socket_strerror($error));
+                    }
+                    $sent += $chunk;
+                    $totalSent += $chunk;
+                }
+                
+                // 每发送1MB数据休息1ms，避免占用过多CPU
+                if ($totalSent % (1024 * 1024) === 0) {
+                    usleep(1000);
+                }
             }
+            fclose($fp);
+            
+            // 恢复阻塞模式
+            socket_set_block($this->socket);
+            
+            // 等待服务器的完成响应
+            $startTime = time();
+            $timeout = 30;
+            $responseReceived = false;
+            
+            while (!$responseReceived && (time() - $startTime < $timeout)) {
+                try {
+                    $response = $this->readResponse();
+                    if (strpos($response, '226') === 0) {
+                        $responseReceived = true;
+                        break;
+                    }
+                } catch (Exception $e) {
+                    // 如果是超时错误，继续等待
+                    if (strpos($e->getMessage(), "timeout") !== false) {
+                        usleep(100000); // 等待100ms
+                        continue;
+                    }
+                    throw $e;
+                }
+            }
+            
+            if (!$responseReceived) {
+                throw new Exception("文件传输可能已完成，但未收到服务器确认");
+            }
+            
+            return true;
+        } catch (Exception $e) {
+            // 确保恢复阻塞模式
+            socket_set_block($this->socket);
+            throw new Exception("上传失败: " . $e->getMessage());
         }
-        fclose($fp);
-        
-        $response = $this->readResponse();
-        if (strpos($response, '226') !== 0) {
-            throw new Exception("文件传输失败: " . $response);
-        }
-        
-        return true;
     }
 } 
