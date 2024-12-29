@@ -166,6 +166,44 @@
             border-radius: 4px;
             color: #666;
         }
+        
+        .btn-delete {
+            background-color: #dc3545;
+            color: white;
+        }
+        
+        .btn-delete:hover {
+            background-color: #c82333;
+        }
+        
+        .dialog-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .dialog-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+            width: 100%;
+        }
+        
+        .dialog-buttons {
+            margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
     </style>
 </head>
 <body>
@@ -435,9 +473,11 @@
                                         <i class="fas fa-download"></i> 下载
                                     </button>
                                 `}
-                                <button onclick="deleteFile('${file.path}')" class="btn btn-small btn-delete">
-                                    <i class="fas fa-trash"></i> 删除
-                                </button>
+                                ${file.name !== '..' ? `
+                                    <button onclick="deleteFile('${file.path}')" class="btn btn-small btn-delete">
+                                        <i class="fas fa-trash"></i> 删除
+                                    </button>
+                                ` : ''}
                             </div>
                         </div>
                     `;
@@ -561,6 +601,39 @@
         } catch (error) {
             console.error('Error:', error);
             alert('下载失败: ' + error.message);
+            hideLoading();
+        }
+    }
+
+    // 添加删除文件功能
+    async function deleteFile(path) {
+        if (!confirm('确定要删除这个文件/目录吗？')) {
+            return;
+        }
+        
+        try {
+            showLoading('正在删除...');
+            
+            const response = await fetch('delete.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `path=${encodeURIComponent(path)}`
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                // 刷新文件列表
+                await enterDirectory(currentPath);
+            } else {
+                throw new Error(data.message || '删除失败');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('删除失败: ' + error.message);
+        } finally {
             hideLoading();
         }
     }

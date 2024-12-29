@@ -23,13 +23,24 @@ class FTPServer {
     private $users = [
         'admin' => [
             'password' => 'admin123',
-            'permissions' => ['read', 'write', 'delete', 'admin'],  // 添加admin权限
-            'root_dir' => '/root/ftp_php'     // admin可以访问根目录
+            'permissions' => ['read', 'write', 'delete', 'admin'],
+            'root_dir' => '/root/ftp_php',
+            'quota' => 1024 * 1024 * 1024, // 1GB配额
+            'description' => '管理员账户'
+        ],
+        'user1' => [
+            'password' => 'user123',
+            'permissions' => ['read', 'write', 'delete'],
+            'root_dir' => '/root/ftp_php/users/user1',
+            'quota' => 500 * 1024 * 1024, // 500MB配额
+            'description' => '普通用户'
         ],
         'guest' => [
             'password' => 'guest123',
             'permissions' => ['read'],
-            'root_dir' => '/root/ftp_php/users/guest'
+            'root_dir' => '/root/ftp_php/users/guest',
+            'quota' => 100 * 1024 * 1024, // 100MB配额
+            'description' => '访客账户'
         ]
     ];
     
@@ -256,8 +267,32 @@ class FTPServer {
     }
     
     private function checkPermission($username, $permission) {
-        return isset($this->users[$username]['permissions']) && 
-               in_array($permission, $this->users[$username]['permissions']);
+        if (!isset($this->users[$username])) {
+            return false;
+        }
+        
+        // admin用户拥有所有权限
+        if (in_array('admin', $this->users[$username]['permissions'])) {
+            return true;
+        }
+        
+        return in_array($permission, $this->users[$username]['permissions']);
+    }
+    
+    private function checkQuota($username, $size) {
+        $userDir = $this->users[$username]['root_dir'];
+        $quota = $this->users[$username]['quota'];
+        
+        $currentSize = $this->getDirSize($userDir);
+        return ($currentSize + $size) <= $quota;
+    }
+    
+    private function getDirSize($dir) {
+        $size = 0;
+        foreach (glob(rtrim($dir, '/').'/*', GLOB_NOSORT) as $each) {
+            $size += is_file($each) ? filesize($each) : $this->getDirSize($each);
+        }
+        return $size;
     }
     
     private function handleCommand($client, $command) {
@@ -510,6 +545,87 @@ class FTPServer {
                 }
                 break;
                 
+            case 'DELE':
+                if (!isset($this->clients[$clientId])) {
+                    $this->sendResponse($client, "530 请先登录\r\n");
+                    break;
+                }
+                $username = $this->clients[$clientId];
+                
+                if (!$this->checkPermission($username, 'delete')) {
+                    $this->sendResponse($client, "550 没有删除权限\r\n");
+                    break;
+                }
+                
+                $filename = isset($cmd[1]) ? $cmd[1] : '';
+                if (empty($filename)) {
+                    $this->sendResponse($client, "550 未指定文件名\r\n");
+                    break;
+                }
+                
+                $filepath = $this->users[$username]['root_dir'] . '/' . $filename;
+                
+                // 检查文件是否存在且在用户目录下
+                if (!file_exists($filepath) || !is_file($filepath)) {
+                    $this->sendResponse($client, "550 文件不存在\r\n");
+                    break;
+                }
+                
+                // 检查文件是否在用户的根目录下
+                if (!$this->checkPermission($username, 'admin') && 
+                    strpos($filepath, $this->users[$username]['root_dir']) !== 0) {
+                    $this->sendResponse($client, "550 没有权限删除此文件\r\n");
+                    break;
+                }
+                
+                if (@unlink($filepath)) {
+                    $this->sendResponse($client, "250 文件删除成功\r\n");
+                } else {
+                    $this->sendResponse($client, "550 删除失败\r\n");
+                }
+                break;
+
+            case 'RMD':
+                if (!isset($this->clients[$clientId])) {
+                    $this->sendResponse($client, "530 请先登录\r\n");
+                    break;
+                }
+                $username = $this->clients[$clientId];
+                
+                if (!$this->checkPermission($username, 'delete')) {
+                    $this->sendResponse($client, "550 没有删除权限\r\n");
+                    break;
+                }
+                
+                $dirname = isset($cmd[1]) ? $cmd[1] : '';
+                if (empty($dirname)) {
+                    $this->sendResponse($client, "550 未指定目录名\r\n");
+                    break;
+                }
+                
+                $dirpath = $this->users[$username]['root_dir'] . '/' . $dirname;
+                
+                // 检查目录是否存在且在用户目录下
+                if (!is_dir($dirpath)) {
+                    $this->sendResponse($client, "550 目录不存在\r\n");
+                    break;
+                }
+                
+                // 检查目录是否在用户的根目录下
+                if (!$this->checkPermission($username, 'admin') && 
+                    strpos($dirpath, $this->users[$username]['root_dir']) !== 0) {
+                    $this->sendResponse($client, "550 没有权限删除此目录\r\n");
+                    break;
+                }
+                
+                // 递归删除目录
+                if ($this->removeDirectory($dirpath)) {
+                    $this->sendResponse($client, "250 目录删除成功\r\n");
+                } else {
+                    $this->sendResponse($client, "550 删除失败\r\n");
+                }
+                break;
+                
             default:
                 if (!empty($action)) {
                     $this->sendResponse($client, "500 未知命令\r\n");
@@ -600,6 +716,23 @@ class FTPServer {
     
     private function getRelativePath($path, $rootDir) {
         return str_replace($rootDir . '/', '', $path);
+    }
+    
+    private function removeDirectory($dir) {
+        if (!is_dir($dir)) {
+            return false;
+        }
+        
+        $files = array_diff(scandir($dir), array('.', '..'));
+        foreach ($files as $file) {
+            $path = $dir . '/' . $file;
+            if (is_dir($path)) {
+                $this->removeDirectory($path);
+            } else {
+                unlink($path);
+            }
+        }
+        return rmdir($dir);
     }
 }
 

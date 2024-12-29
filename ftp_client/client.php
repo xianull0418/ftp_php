@@ -381,4 +381,25 @@ class FTPClient {
             throw new Exception("下载失败: " . $e->getMessage());
         }
     }
+    
+    public function deleteFile($path) {
+        if (!$this->loggedIn) {
+            throw new Exception("未登录");
+        }
+        
+        // 发送DELE命令删除文件，或RMD命令删除目录
+        $isDir = substr($path, -1) === '/';
+        $command = $isDir ? "RMD $path" : "DELE $path";
+        
+        if (!$this->sendCommand($command)) {
+            throw new Exception("发送删除命令失败");
+        }
+        
+        $response = $this->readResponse();
+        if (strpos($response, '250') !== 0) {
+            throw new Exception("删除失败: " . $response);
+        }
+        
+        return true;
+    }
 } 
