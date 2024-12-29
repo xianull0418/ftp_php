@@ -187,6 +187,34 @@
             hideLoading();
         }
     }
+
+    // 处理上传表单提交
+    document.getElementById('uploadForm').onsubmit = async function(e) {
+        e.preventDefault();
+        showLoading();
+        
+        try {
+            const formData = new FormData(this);
+            const response = await fetch('upload.php', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const data = await response.json();
+            if (data.success) {
+                alert('文件上传成功');
+                loadFileList(); // 重新加载文件列表
+            } else {
+                alert(data.message || '上传失败');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('上传错误: ' + error.message);
+        } finally {
+            hideLoading();
+            this.reset(); // 重置表单
+        }
+    };
     </script>
 
     <style>
